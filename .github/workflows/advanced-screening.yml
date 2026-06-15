@@ -1,0 +1,174 @@
+name: 高级AI选股
+
+on:
+  schedule:
+    # 工作日北京时间17:00 (UTC 09:00)
+    - cron: '0 9 * * 1-5'
+
+  workflow_dispatch:
+    inputs:
+      market:
+        description: '选股市场'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all        # A股+美股
+          - a_share    # 仅A股
+          - us         # 仅美股
+      strategy:
+        description: '选股策略'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all              # 所有策略
+          - dual_low         # 双低策略
+          - volume_breakout  # 放量突破
+          - momentum         # 动量策略
+          - oversold_reversal # 超跌反弹
+          - quality_value    # 优质价值
+      top_n:
+        description: '选出前N只'
+        required: false
+        default: '10'
+        type: string
+
+concurrency:
+  group: stock-screening
+  cancel-in-progress: false
+
+jobs:
+  screening:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install akshare yfinance pandas numpy requests
+
+      - name: 创建必要目录
+        run: |
+          mkdir -p screening/results screening/logs
+
+      - name: 执行选股
+        env:
+          # 选股配置
+          STOCK_UNIVERSE: ${{ github.event.inputs.market || 'all' }}
+          SCREENING_STRATEGY: ${{ github.event.inputs.strategy || 'all' }}
+          SCREENING_TOP_N: ${{ github.event.inputs.top_n || '10' }}
+
+          # 通知配置
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+
+          # 时区
+          TZ: 'Asia/Shanghai'
+
+        run: |
+          echo "=========================================="
+          echo "  高级AI选股系统"
+          echo "=========================================="
+          echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo "🌍 市场: $STOCK_UNIVERSE"
+          echo "🎯 策略: $SCREENING_STRATEGY"
+          echo "📊 数量: TOP $SCREENING_TOP_N"
+          echo "=========================================="
+
+          cd screening
+          python screener.py
+
+      - name: 生成选股报告
+        if: success()
+        run: |
+          echo "📊 生成选股报告..."
+          # 可以在这里添加报告生成逻辑
+
+      - name: 推送结果到飞书
+        if: success()
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: |
+          echo "📱 推送选股结果到飞书..."
+          # 读取选股结果并推送到飞书
+          if [ -f "screening/results/latest.json" ]; then
+            python -c "
+          import json
+          import requests
+          import os
+          from datetime import datetime
+
+          # 读取结果
+          with open('screening/results/latest.json', 'r') as f:
+              results = json.load(f)
+
+          # 构建消息
+          webhook_url = os.environ.get('FEISHU_WEBHOOK_URL')
+          if not webhook_url:
+              print('未配置FEISHU_WEBHOOK_URL')
+              exit(0)
+
+          # 按市场分组
+          a_shares = [r for r in results if r.get('市场') == 'A股']
+          us_stocks = [r for r in results if r.get('市场') == '美股']
+
+          lines = ['🎯 AI智能选股报告', '']
+
+          if a_shares:
+              lines.append('🇨🇳 A股推荐：')
+              for i, pick in enumerate(a_shares[:5], 1):
+                  lines.append(f'{i}. {pick.get(\"名称\", \"N/A\")}({pick.get(\"代码\", \"N/A\")}) - 评分: {pick.get(\"得分\", 0):.1f}')
+              lines.append('')
+
+          if us_stocks:
+              lines.append('🇺🇸 美股推荐：')
+              for i, pick in enumerate(us_stocks[:5], 1):
+                  lines.append(f'{i}. {pick.get(\"名称\", \"N/A\")}({pick.get(\"代码\", \"N/A\")}) - 评分: {pick.get(\"得分\", 0):.1f}')
+              lines.append('')
+
+          now = datetime.now().strftime('%Y-%m-%d %H:%M')
+          lines.append(f'⏰ 生成时间: {now}')
+
+          content = '\n'.join(lines)
+
+          # 发送请求
+          payload = {'msg_type': 'text', 'content': {'text': content}}
+          response = requests.post(webhook_url, json=payload, timeout=10)
+
+          if response.status_code == 200:
+              print('✅ 飞书推送成功')
+          else:
+              print(f'❌ 飞书推送失败: {response.status_code}')
+          "
+          fi
+
+      - name: 上传选股结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screening-results-${{ github.run_number }}
+          path: screening/results/
+          retention-days: 30
+
+      - name: 显示运行结果
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "  运行结果"
+          echo "=========================================="
+          echo "✅ 选股完成"
+          echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo "🌍 市场: ${{ github.event.inputs.market || 'all' }}"
+          echo "🎯 策略: ${{ github.event.inputs.strategy || 'all' }}"
+          echo "📊 数量: TOP ${{ github.event.inputs.top_n || '10' }}"
+          echo "=========================================="
